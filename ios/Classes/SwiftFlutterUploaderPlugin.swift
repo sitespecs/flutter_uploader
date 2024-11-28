@@ -91,40 +91,75 @@ public class SwiftFlutterUploaderPlugin: NSObject, FlutterPlugin {
         result(nil)
     }
 
-    private func enqueueMethodCall(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
-        let args = call.arguments as! [String: Any?]
-        let urlString = args["url"] as! String
-        let method = args["method"] as! String
-        let headers = args["headers"] as? [String: Any?]
-        let data = args["data"] as? [String: Any?]
-        let files = args["files"] as? [Any]
-        let tag = args["tag"] as? String
+     private func enqueueMethodCall(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
+                   taskQueue.async { // This will run on a background queue, similar to a separate isolate
+                       guard let args = call.arguments as? [String: Any?],
+                             let urlString = args["url"] as? String,
+                             let method = args["method"] as? String,
+                             let files = args["files"] as? [Any] else {
 
-        let httpMethod = method.uppercased()
+                           DispatchQueue.main.async { // Return result on the main thread
+                               result(FlutterError(code: "invalid_parameters", message: "Invalid parameters passed", details: nil))
+                           }
+                           return
+                       }
 
-        if (!validHttpMethods.contains(httpMethod)) {
-            result(FlutterError(code: "invalid_method", message: "Method must be either POST | PUT | PATCH", details: nil))
-            return
-        }
+                       // Continue with the normal enqueue logic...
 
-        if files == nil || files!.count <= 0 {
-            result(FlutterError(code: "invalid_files", message: "There are no items to upload", details: nil))
-            return
-        }
+                       let headers = args["headers"] as? [String: Any?]
+                       let tag = args["tag"] as? String
+                       let data = args["data"] as? [String: Any?]
 
-        guard let url = URL(string: urlString) else {
-            result(FlutterError(code: "invalid_url", message: "url is not a valid url", details: nil))
-            return
-        }
+                       let httpMethod = method.uppercased()
 
-        uploadTaskWithURLWithCompletion(url: url, files: files!, method: method, headers: headers, parameters: data, tag: tag, completion: { (task, error) in
-            if (error != nil) {
-                result(error!)
-            } else if let uploadTask = task {
-                result(self.urlSessionUploader.identifierForTask(uploadTask))
-            }
-        })
-    }
+                       if !validHttpMethods.contains(httpMethod) {
+                           DispatchQueue.main.async {
+                               result(FlutterError(code: "invalid_method", message: "Method must be either POST | PUT | PATCH", details: nil))
+                           }
+                           return
+                       }
+
+                       if files.isEmpty {
+                           DispatchQueue.main.async {
+                               result(FlutterError(code: "invalid_files", message: "There are no items to upload", details: nil))
+                           }
+                           return
+                       }
+
+                       guard let url = URL(string: urlString) else {
+                           DispatchQueue.main.async {
+                               result(FlutterError(code: "invalid_url", message: "url is not a valid url", details: nil))
+                           }
+                           return
+                       }
+
+                       guard let allowCellular = args["allowCellular"] as? Bool else {
+                           DispatchQueue.main.async {
+                               result(FlutterError(code: "invalid_flag", message: "allowCellular must be set", details: nil))
+                           }
+                           return
+                       }
+
+                       // Call the method that performs the actual task (upload) in a background isolate
+                       self.uploadTaskWithURLWithCompletion(
+                           url: url,
+                           files: files,
+                           method: method,
+                           headers: headers,
+                           parameters: data,
+                           tag: tag,
+                           allowCellular: allowCellular,
+                           completion: { (task, error) in
+                               DispatchQueue.main.async { // Return result on the main thread
+                                   if error != nil {
+                                       result(error!)
+                                   } else if let uploadTask = task {
+                                       result(self.urlSessionUploader.identifierForTask(uploadTask))
+                                   }
+                               }
+                           })
+                   }
+               }
 
     private func enqueueBinaryMethodCall(_ call: FlutterMethodCall, _ result: @escaping FlutterResult) {
         let args = call.arguments as! [String: Any?]
@@ -245,9 +280,13 @@ public class SwiftFlutterUploaderPlugin: NSObject, FlutterPlugin {
                 }
             }
 
-            if fileCount <= 0 {
-                completionHandler(nil, flutterError)
-            } else {
+            guard fileCount > 0 else {
+                   DispatchQueue.main.async {
+                       completionHandler(nil, flutterError)
+                       }
+                       return
+                   }
+
                 let requestId = UUID().uuidString.replacingOccurrences(of: "-", with: "_")
                 let requestFile = "\(requestId).req"
                 let tempPath = tempDirectory.appendingPathComponent(requestFile, isDirectory: false)
@@ -274,7 +313,7 @@ public class SwiftFlutterUploaderPlugin: NSObject, FlutterPlugin {
                     (task, error) in
                     completionHandler(task, error)
                 })
-            }
+
     }
 
     private func makeRequest(_ path: String, _ url: URL, _ method: String, _ headers: [String: Any?]? = [:], _ contentType: String, _ contentLength: UInt64, completion completionHandler: (URLSessionUploadTask?, FlutterError?) -> Void) {
